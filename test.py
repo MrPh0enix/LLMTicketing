@@ -1,5 +1,3 @@
-
-
 from fastapi import FastAPI
 import uvicorn
 from typing import Annotated, TypedDict
@@ -18,16 +16,8 @@ import sqlite3
 
 class TicketState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
-
-
-    
     ticket_id: str | None
-    status: str
-    user_name: str | None
-    title: str | None
-    description: str | None
-    priority: str | None
-
+    status: str | None
 
 class ChatRequest(BaseModel):
     message: str
@@ -35,22 +25,8 @@ class ChatRequest(BaseModel):
 
 
 
-SYSTEM_MESSAGE = [
-        SystemMessage(
-            content="""
-            You are a ticketing assistant.
-
-            Extract and maintain:
-            - title
-            - description
-            - priority
-            - user_name
-
-            Ask questions if missing information.
-            Call create_ticket_in_db ONLY when all fields are filled.
-            """
-                )
-        ]
+SYSTEM_MESSAGE = SystemMessage(content= "You are a helpful assistant, talk to the user and answer any questions")
+        
 
 
 @tool
@@ -59,23 +35,28 @@ def create_ticket_in_db(title: str, description: str, priority: str, user_name: 
     print(f"DB entry created: {title}, {description}, {priority}, {user_name}")
     return True
 
+@tool
+def print_to_console(text: str):
+    """Print something to the console"""
+    print(f"The user said this: {text}")
+    return True
+
 
 class chatAPI():
     
     def __init__(self):
 
-        self.tools_list = [create_ticket_in_db]
+        self.tools_list = [create_ticket_in_db, print_to_console]
         self.llm = self._build_llm()
         self.tool_node = ToolNode(self.tools_list)
         conn = sqlite3.connect("databases/chat_history.db", check_same_thread=False)
         self.checkpointer = SqliteSaver(conn)
         self.graph = self._build_graph()
-        
-
 
         self.app = FastAPI()
         #routes
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
+    
     
    
     
@@ -89,13 +70,13 @@ class chatAPI():
         graph = build.compile(checkpointer = self.checkpointer)
         return graph
     
+    
+    def _model_node(self, state: TicketState):
+        response = self.llm.invoke(state["messages"])
+        return {"messages": [response]}
 
     
     
-    
-
-    def _check_state_first(self, state: TicketState):
-        pass
 
     def _build_llm(self):
         return ChatOpenAI(
@@ -104,11 +85,6 @@ class chatAPI():
             api_key="not-needed"
         ).bind_tools(self.tools_list)
 
-    def _model_node(self, state: TicketState):
-
-        response = self.llm.invoke(state["messages"])
-        return {"messages": [response]}
-    
 
 
     def chat(self, req: ChatRequest):

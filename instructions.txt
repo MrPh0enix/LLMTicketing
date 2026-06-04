@@ -1,7 +1,7 @@
 
 1. Install Llama cpp and:
 
-C:\Users\John\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-server.exe -m models\gemma-4-E4B-it-IQ4_NL.gguf
+C:\Users\USER\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\llama-server.exe -m models\gemma-3-1b-it-Q8_0.gguf
 
 2. Run llamacpp chat app:
 
