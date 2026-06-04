@@ -5,6 +5,9 @@ from langchain_openai import ChatOpenAI
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 from typing import List, Literal, Union
 import json
@@ -41,6 +44,9 @@ class LLMOutput(BaseModel):
     content: Union[ChatResponse, ProposeTicket]
 
 
+SYSTEM_PROMPT = """You are a customer support assistant."""
+
+
 
 class chatAPI():
     
@@ -49,19 +55,40 @@ class chatAPI():
         self.model = self.get_model()
         self.structured_model = self.model.with_structured_output(LLMOutput)
 
-        response = self.structured_model.invoke(
-            "Summarize this text and determine its sentiment: I love this product."
-        )
-        print("This is the response: ...........................", response)
-        self.chat_obj = self.get_chat_obj(self.structured_model)
-        self.app = FastAPI()
+        self.checkpointer = SqliteSaver.from_conn_string("databases/chat_history.db")
+        self.graph = self.build_graph()
+
         self.pending_ticket = {} 
         self.awaiting_confirmation = {}  
 
+        self.app = FastAPI()
         #routes
         self.app.add_api_route("/chat", self.chat, methods=["POST"])
 
     
+    def build_graph(self):
+        def call_model(state: MessagesState):
+            messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+            response = self.structured_model.invoke(messages)
+            ai_message = response
+
+            from langchain_core.messages import AIMessage
+
+            ai_msg = AIMessage(
+                content=ai_message.content.model_dump_json() if hasattr(ai_message.content, 'model_dump_json') else str(ai_message.content),
+                additional_kwargs={"structured": ai_message.model_dump()}
+            )
+            return {"messages": [ai_msg]}
+        
+        builder = StateGraph(MessagesState)
+        builder.add_node("model", call_model)
+        builder.add_edge(START, "model")
+        builder.add_edge("model", END)
+        
+        return builder.compile(checkpointer=self.checkpointer)
+    
+
+
     def chat(self, req: ChatRequest):
 
         text = req.message.lower().strip()
@@ -98,106 +125,52 @@ class chatAPI():
                 return {
                     "response": "Please reply yes or no."
                 }
+            
+        
+        config = {"configurable": {"thread_id": session_id}}
         
 
-        response = self.chat_obj.invoke(
-            {"input": req.message},
-            config={
-                "configurable": {
-                    "session_id": session_id
-                }
-            }
+        result = self.graph.invoke(
+            {"messages": [HumanMessage(content=req.message)]},
+            config=config
         )
 
+        last_msg = result["messages"][-1]
 
-        if isinstance(response, ChatResponse):
-            print('Chat response')
-            print(response.message)
+        structured = last_msg.additional_kwargs.get("structured")
 
-        if isinstance(response, ProposeTicket):
-            print('Propose ticket response')
-            print(response.ticket.customer_name)
+        if structured is None:
+            return {"response": last_msg.content}
+        
+        content = structured.get("content", {})
+        response_type = content.get("type")
 
-
-
-        parsed = self.check_action_response_and_exec(response.content)
-
-        if parsed is None:
-            return {"response": response.content}
-
-        # ticket proposal
-        if parsed.get("action") == "confirm_ticket":
-
-            self.pending_ticket[session_id] = parsed["ticket"]
+        if response_type == "propose_ticket":
+            ticket_data = content.get("ticket")
+            self.pending_ticket[session_id] = ticket_data
             self.awaiting_confirmation[session_id] = True
-
             return {
                 "response": "Please confirm this ticket (yes/no)",
-                "ticket_preview": parsed["ticket"],
+                "ticket_preview": ticket_data,
                 "awaiting_confirmation": True
             }
 
-        # normal chat
-        if parsed.get("type") == "chat":
-            return {
-                "response": parsed["message"]
-            }
+        if response_type == "chat":
+            return {"response": content.get("message")}
 
-        return {"response": response.content}
-
-
-    def check_action_response_and_exec(self, response):
-
-        try:
-            data = json.loads(response)
-
-            if data.get("type") == "propose_ticket":
-
-                return {
-                    "action": "confirm_ticket",
-                    "ticket": data["ticket"]
-                }
-
-            return data
-
-        except Exception as e:
-            print("JSON parse error:", e)
-            return None
+        return {"response": last_msg.content}
             
     
+
     def create_ticket_in_db(self, ticket):
         print('DB entry created with: ', ticket)
+    
     
     
     def get_model(self):
         return ChatOpenAI(model="local-model",
                           base_url="http://127.0.0.1:8080",
                           api_key="not-needed")
-    
-
-    def get_chat_obj(self, model):
-
-        SYSTEM_PROMPT = """
-                        You are a customer support assistant.
-                        """
-        
-        prompt = ChatPromptTemplate.from_messages([
-                                        ("system", SYSTEM_PROMPT),
-                                        MessagesPlaceholder("history"),
-                                        ("human", "{input}")
-                                    ])
-        
-        chain = prompt | model
-
-        return RunnableWithMessageHistory(chain,
-                                    self.get_session_history,
-                                    input_messages_key="input",
-                                    history_messages_key="history")
-    
-
-    def get_session_history(self, session_id: str):
-        return SQLChatMessageHistory(session_id = session_id,
-                                     connection = "sqlite:///databases/chat_history.db")
     
 
     def run(self):
